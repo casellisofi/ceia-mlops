@@ -85,7 +85,7 @@ def train_stroke_model():
             "mlflow==2.19.0",
             "boto3",
         ],
-        system_site_packages=False,
+        system_site_packages=True,
     )
     def train_and_register(df_json: str):
         import os
