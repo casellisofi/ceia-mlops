@@ -1,62 +1,35 @@
-import os
-import numpy as np
 import pandas as pd
-import mlflow.sklearn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-MODEL_NAME = "stroke-predictor"
-THRESHOLD = float(os.getenv("STROKE_THRESHOLD", "0.17847"))
-
-mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+from model import THRESHOLD, load_model, get_model
+from preprocessing import apply_feature_engineering
+from schemas import PacienteInput, PredictionOutput
 
 app = FastAPI(title="Stroke Prediction API")
 
-model = None
 
 @app.on_event("startup")
-def load_model():
-    global model
-    try:
-        model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/latest")
-        print("Modelo cargado correctamente.")
-    except Exception as e:
-        print(f"Error cargando modelo: {e}")
+def startup():
+    load_model()
 
-class PacienteInput(BaseModel):
-    age: float
-    hypertension: int
-    heart_disease: int
-    gender: str  # "Male", "Female"
-    ever_married: str
-    work_type: str
-    Residence_type: str
-    avg_glucose_level: float
-    bmi: float
-    smoking_status: str
 
 @app.get("/")
 def root():
-    return {"status": "ok", "model": MODEL_NAME}
+    """Healthcheck: verifica que la API este en linea."""
+    return {"status": "ok", "model": "stroke-predictor"}
 
-@app.post("/predict")
+
+@app.post("/predict", response_model=PredictionOutput)
 def predict(paciente: PacienteInput):
+    """Recibe datos clinicos, aplica feature engineering y retorna la prediccion de ACV."""
+    model = get_model()
     if model is None:
         raise HTTPException(status_code=503, detail="Modelo no disponible")
 
     df = pd.DataFrame([paciente.dict()])
+    df = apply_feature_engineering(df)
 
-    # Feature engineering igual al notebook
-    df["age_group"] = pd.cut(df["age"], bins=[0, 30, 50, 70, 120],
-                              labels=["Joven", "Adulto", "Mayor", "Anciano"]).astype(str)
-    df["avg_glucose_level"] = np.clip(df["avg_glucose_level"], 50, 300)
-    df["has_risk_factors"] = ((df["hypertension"] == 1) | (df["heart_disease"] == 1)).astype(int)
-    df["is_female"] = (df["gender"] == "Female").astype(int)
-    df = df.drop(columns=["gender"])
-    df["work_type"] = df["work_type"].replace({"Never_worked": "children"})
-
-    proba = model.predict_proba(df)[:, 1][0]
+    proba = float(model.predict_proba(df)[:, 1][0])
     prediccion = int(proba >= THRESHOLD)
 
     if proba < 0.3:
@@ -66,9 +39,9 @@ def predict(paciente: PacienteInput):
     else:
         riesgo = "Alto"
 
-    return {
-        "probabilidad_acv": round(float(proba), 4),
-        "prediccion": prediccion,
-        "riesgo": riesgo,
-        "threshold_usado": THRESHOLD,
-    }
+    return PredictionOutput(
+        probabilidad_acv=round(proba, 4),
+        prediccion=prediccion,
+        riesgo=riesgo,
+        threshold_usado=THRESHOLD,
+    )

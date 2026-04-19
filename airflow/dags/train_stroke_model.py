@@ -2,11 +2,15 @@ from airflow.decorators import dag, task
 from datetime import datetime
 import os
 
-MLFLOW_TRACKING_URI = "http://mlflow:5000"
-MINIO_ENDPOINT = "http://s3:9000"
-DATA_BUCKET = "data"
-DATA_KEY = "stroke-data.csv"
-RANDOM_STATE = 42
+from config import (
+    MLFLOW_TRACKING_URI,
+    MINIO_ENDPOINT,
+    DATA_BUCKET,
+    DATA_KEY,
+    RANDOM_STATE,
+    MODEL_NAME,
+    EXPERIMENT_NAME,
+)
 
 
 @dag(
@@ -20,6 +24,7 @@ def train_stroke_model():
 
     @task
     def check_dataset():
+        """Verifica que el CSV exista en MinIO antes de iniciar el pipeline."""
         import boto3
         s3 = boto3.client(
             "s3",
@@ -29,10 +34,11 @@ def train_stroke_model():
         )
         try:
             s3.head_object(Bucket=DATA_BUCKET, Key=DATA_KEY)
-            print("Dataset ya existe en MinIO.")
+            print("Dataset encontrado en MinIO.")
         except Exception:
             raise FileNotFoundError(
-                f"El archivo {DATA_KEY} no está en el bucket '{DATA_BUCKET}'."
+                f"El archivo '{DATA_KEY}' no esta en el bucket '{DATA_BUCKET}'. "
+                "Subilo a MinIO antes de ejecutar el DAG (ver README)."
             )
 
     @task.virtualenv(
@@ -40,6 +46,7 @@ def train_stroke_model():
         system_site_packages=False,
     )
     def load_data():
+        """Descarga el CSV desde MinIO y lo retorna como JSON."""
         import boto3
         import pandas as pd
         from io import StringIO
@@ -60,13 +67,17 @@ def train_stroke_model():
         system_site_packages=False,
     )
     def feature_engineering(df_json: str):
+        """Genera variables derivadas y limpia el dataset."""
         import pandas as pd
         import numpy as np
 
         df = pd.read_json(df_json)
         df = df.drop(columns=["id"])
-        df["age_group"] = pd.cut(df["age"], bins=[0, 30, 50, 70, 120],
-                                  labels=["Joven", "Adulto", "Mayor", "Anciano"]).astype(str)
+        df["age_group"] = pd.cut(
+            df["age"],
+            bins=[0, 30, 50, 70, 120],
+            labels=["Joven", "Adulto", "Mayor", "Anciano"],
+        ).astype(str)
         df["avg_glucose_level"] = np.clip(df["avg_glucose_level"], 50, 300)
         df["has_risk_factors"] = np.where(
             (df["hypertension"] == 1) | (df["heart_disease"] == 1), 1, 0
@@ -88,9 +99,9 @@ def train_stroke_model():
         system_site_packages=True,
     )
     def train_and_register(df_json: str):
+        """Entrena Regresion Logistica con SMOTE y registra el modelo en MLflow."""
         import os
         import pandas as pd
-        import numpy as np
         import mlflow
         import mlflow.sklearn
         from sklearn.linear_model import LogisticRegression
@@ -99,12 +110,12 @@ def train_stroke_model():
         from sklearn.model_selection import train_test_split
         from sklearn.metrics import (
             roc_auc_score, recall_score, precision_score,
-            f1_score, precision_recall_curve
+            f1_score, precision_recall_curve,
         )
         from imblearn.pipeline import Pipeline as ImbPipeline
         from imblearn.over_sampling import SMOTE
 
-        MLFLOW_TRACKING_URI = "http://mlflow:5000"
+        MLFLOW_URI = "http://mlflow:5000"
         RANDOM_STATE = 42
 
         df = pd.read_json(df_json)
@@ -119,20 +130,20 @@ def train_stroke_model():
         X_train["bmi"] = X_train["bmi"].fillna(bmi_median)
         X_test["bmi"] = X_test["bmi"].fillna(bmi_median)
 
-        cols_eliminar_lr = ["heart_disease", "bmi", "smoking_status", "age_group"]
-        num_features_lr = (
+        cols_drop = ["heart_disease", "bmi", "smoking_status", "age_group"]
+        num_features = (
             X.select_dtypes(exclude="object")
-            .columns.drop(cols_eliminar_lr, errors="ignore")
+            .columns.drop(cols_drop, errors="ignore")
             .tolist()
         )
 
-        preprocessor_lr = ColumnTransformer([
-            ("num", StandardScaler(), num_features_lr),
+        preprocessor = ColumnTransformer([
+            ("num", StandardScaler(), num_features),
             ("cat", OneHotEncoder(drop="first", handle_unknown="ignore"), []),
         ])
 
         pipeline = ImbPipeline(steps=[
-            ("preprocessor", preprocessor_lr),
+            ("preprocessor", preprocessor),
             ("smote", SMOTE(random_state=RANDOM_STATE)),
             ("model", LogisticRegression(
                 C=0.1,
@@ -152,33 +163,36 @@ def train_stroke_model():
         best_threshold = float(thr_candidates.max()) if len(thr_candidates) > 0 else 0.5
         y_pred = (y_proba >= best_threshold).astype(int)
 
-        auc = roc_auc_score(y_test, y_proba)
-        rec = recall_score(y_test, y_pred)
-        prec = precision_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
+        metrics = {
+            "roc_auc": roc_auc_score(y_test, y_proba),
+            "recall": recall_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred),
+            "f1": f1_score(y_test, y_pred),
+        }
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_tracking_uri(MLFLOW_URI)
         mlflow.set_experiment("stroke-prediction")
 
         with mlflow.start_run(run_name="logistic_regression_smote"):
-            mlflow.log_param("C", 0.1)
-            mlflow.log_param("penalty", "l1")
-            mlflow.log_param("solver", "liblinear")
-            mlflow.log_param("threshold", best_threshold)
-            mlflow.log_param("bmi_median", bmi_median)
-            mlflow.log_metric("roc_auc", auc)
-            mlflow.log_metric("recall", rec)
-            mlflow.log_metric("precision", prec)
-            mlflow.log_metric("f1", f1)
-
+            mlflow.log_params({
+                "C": 0.1,
+                "penalty": "l1",
+                "solver": "liblinear",
+                "threshold": best_threshold,
+                "bmi_median": bmi_median,
+            })
+            mlflow.log_metrics(metrics)
             mlflow.sklearn.log_model(
                 pipeline,
                 artifact_path="model",
                 registered_model_name="stroke-predictor",
             )
-            print(f"AUC: {auc:.4f} | Recall: {rec:.4f} | Threshold: {best_threshold:.5f}")
+            print(
+                f"AUC: {metrics['roc_auc']:.4f} | "
+                f"Recall: {metrics['recall']:.4f} | "
+                f"Threshold: {best_threshold:.5f}"
+            )
 
-    # Encadenados
     df_raw = load_data()
     df_features = feature_engineering(df_raw)
     check_dataset() >> df_raw

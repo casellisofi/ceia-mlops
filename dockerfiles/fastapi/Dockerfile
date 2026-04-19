@@ -12,6 +12,6 @@ RUN pip install --no-cache-dir \
     numpy==1.26.4  \
     imbalanced-learn==0.12.3
 
-COPY app.py .
+COPY app.py schemas.py preprocessing.py model.py ./
 
 EXPOSE 8800
