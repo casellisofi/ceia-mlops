@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package stroke;
+
+// Servicio de prediccion de ACV (mismo modelo que REST y GraphQL).
+service StrokePredictor {
+  rpc Predict (PacienteRequest) returns (PredictionResponse);
+  rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message PacienteRequest {
+  double age = 1;
+  int32 hypertension = 2;
+  int32 heart_disease = 3;
+  string gender = 4;
+  string ever_married = 5;
+  string work_type = 6;
+  string residence_type = 7;
+  double avg_glucose_level = 8;
+  double bmi = 9;
+  string smoking_status = 10;
+}
+
+message PredictionResponse {
+  double probabilidad_acv = 1;
+  int32 prediccion = 2;
+  string riesgo = 3;
+  double threshold_usado = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+}

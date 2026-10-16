@@ -141,14 +141,17 @@ services:
       - s3
     networks:
       - backend
-    entrypoint: >
-      /bin/sh -c '
-      sleep 5;
-      /usr/bin/mc alias set s3 http://s3:9000 ${MINIO_ACCESS_KEY:-minio} ${MINIO_SECRET_ACCESS_KEY:-minio123};
-      /usr/bin/mc mb s3/${MLFLOW_BUCKET_NAME:-mlflow};
-      /usr/bin/mc mb s3/${DATA_REPO_BUCKET_NAME:-data};
-      exit 0;
-      '
+    entrypoint: ["/bin/sh", "/init/init-minio.sh"]
+    volumes:
+      - ./dockerfiles/minio:/init:ro
+    environment:
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minio}
+      - MINIO_SECRET_ACCESS_KEY=${MINIO_SECRET_ACCESS_KEY:-minio123}
+      - MLFLOW_BUCKET_NAME=${MLFLOW_BUCKET_NAME:-mlflow}
+      - DATA_REPO_BUCKET_NAME=${DATA_REPO_BUCKET_NAME:-data}
+      - LAKE_BUCKET_NAME=${LAKE_BUCKET_NAME:-datalake}
+      - API_S3_USER=${API_S3_USER:-api_user}
+      - API_S3_PASSWORD=${API_S3_PASSWORD:?definir API_S3_PASSWORD en .env (ver .env.example)}
 
   mlflow:
     restart: always
@@ -177,7 +180,7 @@ services:
       --host 0.0.0.0
       --default-artifact-root s3://${MLFLOW_BUCKET_NAME:-mlflow}/
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://mlflow:5000 || exit 1
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
       timeout: 20s
       retries: 5
@@ -199,20 +202,80 @@ services:
       - frontend
       - backend
     environment:
-      - AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY:-minio}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_ACCESS_KEY:-minio123}
+      - AWS_ACCESS_KEY_ID=${API_S3_USER:-api_user}
+      - AWS_SECRET_ACCESS_KEY=${API_S3_PASSWORD:?definir API_S3_PASSWORD en .env (ver .env.example)}
       - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
       - AWS_ENDPOINT_URL_S3=http://s3:9000
+      - LAKE_BUCKET_NAME=${LAKE_BUCKET_NAME:-datalake}
+      - MODEL_NAME=${MODEL_NAME:-stroke-predictor}
+      - REDIS_URL=redis://redis:6379/1
+      - API_KEYS=${API_KEYS:-}
+      - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-60}
     command: >
       uvicorn app:app 
       --host 0.0.0.0
       --port 8800
     healthcheck:
-      test: curl --include --request GET http://fastapi:8800/ || exit 1
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8800/')"]
       interval: 60s
       timeout: 10s
       start_period: 120s
       retries: 3
+
+  grpc_server:
+    restart: always
+    image: backend_fastapi
+    container_name: grpc_server
+    profiles:
+      - all
+    depends_on:
+      mlflow:
+        condition: service_started
+      fastapi:
+        condition: service_started
+    ports:
+      - "${GRPC_PORT:-50051}:50051"
+    networks:
+      - frontend
+      - backend
+    environment:
+      - AWS_ACCESS_KEY_ID=${API_S3_USER:-api_user}
+      - AWS_SECRET_ACCESS_KEY=${API_S3_PASSWORD:?definir API_S3_PASSWORD en .env (ver .env.example)}
+      - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
+      - AWS_ENDPOINT_URL_S3=http://s3:9000
+      - LAKE_BUCKET_NAME=${LAKE_BUCKET_NAME:-datalake}
+      - MODEL_NAME=${MODEL_NAME:-stroke-predictor}
+      - REDIS_URL=redis://redis:6379/1
+      - API_KEYS=${API_KEYS:-}
+      - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-60}
+    command: python grpc_server.py
+
+  stream_worker:
+    restart: always
+    image: backend_fastapi
+    container_name: stream_worker
+    profiles:
+      - all
+    depends_on:
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+      fastapi:
+        condition: service_started
+    networks:
+      - backend
+    environment:
+      - AWS_ACCESS_KEY_ID=${API_S3_USER:-api_user}
+      - AWS_SECRET_ACCESS_KEY=${API_S3_PASSWORD:?definir API_S3_PASSWORD en .env (ver .env.example)}
+      - MLFLOW_S3_ENDPOINT_URL=http://s3:9000
+      - AWS_ENDPOINT_URL_S3=http://s3:9000
+      - LAKE_BUCKET_NAME=${LAKE_BUCKET_NAME:-datalake}
+      - MODEL_NAME=${MODEL_NAME:-stroke-predictor}
+      - REDIS_URL=redis://redis:6379/1
+      - API_KEYS=${API_KEYS:-}
+      - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-60}
+    command: python stream_worker.py
 
   airflow-apiserver:
     <<: *airflow-common
